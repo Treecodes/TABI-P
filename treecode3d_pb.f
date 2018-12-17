@@ -1,5 +1,6 @@
       MODULE treecode3d_procedures
-
+      use molecule
+	  include 'omp_lib.h'
 
 C r8 is 8-byte (double precision) real
 
@@ -21,7 +22,7 @@ C global variables used when computing potential/force
       INTEGER :: orderoffset
       REAL(KIND=r8),DIMENSION(3) :: tarpos,tarq
 C ######################################      
-      REAL(KIND=r8) :: tarchr,peng_old
+      REAL(KIND=r8) :: tarchr,peng_old(2)
 C ######################################
 
 C global variables for position and charge storage 
@@ -43,6 +44,7 @@ C node pointer and node type declarations
            REAL(KIND=r8)    :: radius,aspect
            INTEGER          :: level,num_children,exist_ms
            REAL(KIND=r8),DIMENSION(:,:,:,:),POINTER :: ms
+		   REAL(KIND=r8),DIMENSION(:,:,:,:),POINTER :: ms_new
            TYPE(tnode_pointer), DIMENSION(8) :: child
       END TYPE tnode
 C#######################################
@@ -232,7 +234,7 @@ C
          xyzmms(4,1)=p%y_max
          xyzmms(5,1)=p%z_min
          xyzmms(6,1)=p%z_max
-         ind=0
+         ind=0 !Weihua
          ind(1,1)=ibeg
          ind(1,2)=iend
          x_mid=p%x_mid
@@ -244,9 +246,9 @@ C
 
 C########################################################
 C Shrink the box
-      if (1==1) then
+C      if (1==2) then
          do i=1,8
-             if (ind(i,1) .le. ind(i,2)) then
+             if (ind(i,1) < ind(i,2)) then
                  xyzmms(1,i)=minval(x(ind(i,1):ind(i,2)))
                  xyzmms(2,i)=maxval(x(ind(i,1):ind(i,2)))
                  xyzmms(3,i)=minval(y(ind(i,1):ind(i,2)))
@@ -255,7 +257,7 @@ C Shrink the box
                  xyzmms(6,i)=maxval(z(ind(i,1):ind(i,2)))
              endif       
          end do
-      endif
+C      endif
 C########################################################
 C
 C create children if indicated and store info in parent
@@ -354,78 +356,36 @@ C local variables
       END SUBROUTINE PARTITION_8
       
 CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
-      RECURSIVE SUBROUTINE COMPP_TREE(p,peng,x,y,z,q,tpoten,kappa,theta,
-     &                                numpars,kk,eps,tempq,der_cof)
+      RECURSIVE SUBROUTINE COMPP_TREE(p,peng,x,y,z,q,q_u,tpoten,kappa,
+     &                               theta,numpars,kk,eps,tempq,der_cof)
       IMPLICIT NONE
 
-      INTEGER,INTENT(IN) :: numpars,kk(3,4)
+      INTEGER,INTENT(IN) :: numpars,kk(3,16)
       TYPE(tnode),POINTER :: p   
-      REAL(KIND=r8),INTENT(INOUT) :: peng     
+      REAL(KIND=r8),INTENT(INOUT) :: peng(2)     
       REAL(KIND=r8),DIMENSION(numpars),INTENT(IN) :: x,y,z
-      REAL(KIND=r8),DIMENSION(numpars,4),INTENT(IN) :: q
-      REAL(KIND=r8),DIMENSION(numpars),INTENT(IN) :: tpoten
-      REAL(KIND=r8),INTENT(IN):: kappa,theta,eps,tempq(4)
+      REAL(KIND=r8),DIMENSION(numpars,16,2),INTENT(IN) :: q
+	  REAL(KIND=r8),DIMENSION(numpars,16,2),INTENT(IN) :: q_u
+      REAL(KIND=r8),DIMENSION(2*numpars),INTENT(IN) :: tpoten
+      REAL(KIND=r8),INTENT(IN):: kappa,theta,eps,tempq(16,2)
       REAL(KIND=r8),INTENT(IN):: 
-     & der_cof(0:torder2,0:torder2,0:torder2,4)
+     & der_cof(0:torder2,0:torder2,0:torder2,16)
 
 C local variables
 
-      REAL(KIND=r8) :: tx,ty,tz,dist,penglocal
-      real(kind=r8) :: SL(4),pt_comp(4)
+      REAL(KIND=r8) :: tx,ty,tz,dist,penglocal(2),kapa(2)
+      real(kind=r8) :: SL(4),pt_comp(16,2)
       INTEGER :: i,j,k,ijk(3),ikp,indx,err
 
 C determine DISTSQ for MAC test
-      tx=p%x_mid-tarpos(1)
-      ty=p%y_mid-tarpos(2)
-      tz=p%z_mid-tarpos(3)
-      dist=SQRT(tx*tx+ty*ty+tz*tz)
 
 C intialize potential energy and force 
       peng=0.0_r8
 
-C If MAC is accepted and there is more than 1 particle in the 
-C box use the expansion for the approximation.
 
-      IF ((p%radius .LT. dist*theta) .AND.
-     &    (p%numpar .GT. 40)) THEN
-C@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@         
-        IF (p%exist_ms .EQ. 0) THEN
-		ALLOCATE(p%ms(4,0:torder,0:torder,0:torder),STAT=err)
-		IF (err .NE. 0) THEN
-			WRITE(6,*) 'Error allocating node moments! '
-			STOP
-		END IF
-C#####################################################################
-C Generate the moments if not allocated yet 
-		CALL COMP_MS(p,x,y,z,q(:,:),numpars)
-C#####################################################################			
-		p%exist_ms=1
-	END IF   
-       
-       CALL  COMPP_TREE_PB(kk,p,peng,kappa,theta,eps,tempq,der_cof)
-C       CALL COMPP_DIRECT_PB(penglocal,p%ibeg,p%iend,
-C     &                        x,y,z,tpoten,kappa,numpars,eps)
-C       write(*,*) peng(1),penglocal(1),(peng(1)-penglocal(1))/peng(1)
-C       write(*,*) peng(2),penglocal(2),(peng(2)-penglocal(2))/peng(2)
-C       pause
-C       peng=penglocal
-      ELSE
-
-C If MAC fails check to see if there are children. If not, perform direct 
-C calculation.  If there are children, call routine recursively for each.
-C
-         IF (p%num_children .EQ. 0) THEN
             CALL COMPP_DIRECT_PB(penglocal,p%ibeg,p%iend,
      &                        x,y,z,tpoten,kappa,numpars,eps)
             peng=penglocal
-         ELSE
-            DO i=1,p%num_children
-               CALL COMPP_TREE(p%child(i)%p_to_tnode,penglocal,x,y,z,q,
-     &               tpoten,kappa,theta,numpars,kk,eps,tempq,der_cof)
-               peng=peng+penglocal
-            END DO  
-         END IF 
-      END IF
 
       RETURN
       END SUBROUTINE COMPP_TREE
@@ -434,42 +394,55 @@ CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
       SUBROUTINE COMPP_TREE_PB(kk,p,peng,kappa,theta,eps,tempq,der_cof)
       IMPLICIT NONE
       
-      INTEGER,INTENT(IN) :: kk(3,4)
+      INTEGER,INTENT(IN) :: kk(3,16)
       TYPE(tnode),POINTER :: p
-      REAL(KIND=r8),INTENT(INOUT) :: peng
+      REAL(KIND=r8),INTENT(INOUT) :: peng(2)
 C      REAL(KIND=r8),DIMENSION(numpars),INTENT(IN) :: x,y,z
 C      REAL(KIND=r8),DIMENSION(numpars,16,2),INTENT(IN) :: q
 C      REAL(KIND=r8),DIMENSION(2*numpars),INTENT(IN) :: tpoten
-      REAL(KIND=r8),INTENT(IN):: kappa,theta,eps,tempq(4),
-     & der_cof(0:torder2,0:torder2,0:torder2,4)
+      REAL(KIND=r8),INTENT(IN):: kappa,theta,eps,tempq(16,2),
+     & der_cof(0:torder2,0:torder2,0:torder2,16)
 C local variables
 
-      real(kind=r8) :: SL(4),pt_comp(4)
+      REAL(KIND=r8) :: kapa(2)
+      real(kind=r8) :: SL(4),pt_comp(16,2)
       INTEGER :: i,j,k,ikp,indx,kk1,kk2,kk3
 
-    
-        !do ikp=1,2
+      
+       
+        kapa=(/0.d0,kappa/)
+        do ikp=1,2
 C Get the fundermental solution of Poisson equation and PB equation			
-		CALL COMP_TCOEFF(p)
-		do indx=2,4
-		    peng=0.0d0
+		CALL COMP_TCOEFF(p,kapa(ikp))
+		do indx=1,16
+		    !kk1=kk(1,indx)
+                    !kk2=kk(2,indx)
+                    !kk3=kk(3,indx)
+                    peng=0.0d0
 		    DO k=0,torder2
 		        DO j=0,torder2-k
 		            DO i=0,torder2-k-j
-		                 peng=peng+der_cof(i,j,k,indx)
+		                 peng(ikp)=peng(ikp)+der_cof(i,j,k,indx)
      &		                 *a(i+kk(1,indx),j+kk(2,indx),k+kk(3,indx))
-     &		                 *p%ms(indx,i,j,k)
+     &		                 *(p%ms(indx,i,j,k)-
+     &						 peng_old(1)*p%ms_new(indx,i,j,k))
   		            END DO
 		        END DO
 		    END DO
-		    pt_comp(indx)=tempq(indx)*peng
+		    pt_comp(indx,ikp)=tempq(indx,ikp)*peng(ikp)
 		enddo
-		peng=-sum(pt_comp(2:4))
+        enddo
+        sL(1)=pt_comp(1,1)-pt_comp(1,2)
+        sL(2)=eps*(sum(pt_comp(2:4,2)))-sum(pt_comp(2:4,1))
+        sL(3)=-(sum(pt_comp(5:7,1))-1/eps*sum(pt_comp(5:7,2)))
+        sL(4)=sum(pt_comp(8:16,2))-sum(pt_comp(8:16,1))
+   		  
+        peng(1)=sL(1)+sL(2)
+        peng(2)=sL(3)+sL(4)
       END SUBROUTINE COMPP_TREE_PB
 
-
 CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
-      SUBROUTINE COMP_TCOEFF(p)
+      SUBROUTINE COMP_TCOEFF_NEW(p,kappa)
       IMPLICIT NONE
 C
 C COMP_TCOEFF computes the Taylor coefficients of the potential
@@ -477,13 +450,21 @@ C using a recurrence formula.  The center of the expansion is the
 C midpoint of the node P.  TARPOS and TORDERLIM are globally defined.
 C
       TYPE(tnode),POINTER :: p
+      REAL(KIND=r8),INTENT(IN)  :: kappa
 
 C local varaibles
 
-      REAL(KIND=r8) :: dx,dy,dz,ddx,ddy,ddz,dist,fac 
+      REAL(KIND=r8) :: dx,dy,dz,ddx,ddy,ddz,dist,fac,cf1_new(torderlim)
+      REAL(KIND=r8) :: kappax,kappay,kappaz
       INTEGER :: i,j,k
 
+C################################
+C Temp variables for saving time
+      real*8:: a0,b0,ab0,cft1,cft2,cft3
+C################################      
+
 C setup variables
+      cf1_new=cf1*kappa 
      
       dx=tarpos(1)-p%x_mid
       dy=tarpos(2)-p%y_mid
@@ -493,81 +474,146 @@ C setup variables
       ddy=2.0_r8*dy
       ddz=2.0_r8*dz
 
+      kappax=kappa*dx
+      kappay=kappa*dy
+      kappaz=kappa*dz
+
       dist=dx*dx+dy*dy+dz*dz
       fac=1.0_r8/dist
       dist=SQRT(dist)
 
 C 0th coeff or function val
 
-      a(0,0,0)=1.d0/dist
+      b(0,0,0)=EXP(-kappa*dist)
+      a(0,0,0)=b(0,0,0)/dist
 
 C 2 indices are 0
 
-      a(1,0,0)=fac*dx*a(0,0,0) 
-      a(0,1,0)=fac*dy*a(0,0,0) 
-      a(0,0,1)=fac*dz*a(0,0,0) 
+C##############################
+      a0=a(0,0,0)
+      b0=b(0,0,0)
+      ab0=fac*(a0+kappa*b0)
+C#############################
+      b(1,0,0)=kappax*a0
+      b(0,1,0)=kappay*a0
+      b(0,0,1)=kappaz*a0
+
+      a(1,0,0)=dx*(ab0)
+      a(0,1,0)=dy*(ab0)
+      a(0,0,1)=dz*(ab0)
 
 
       DO i=2,torderlim
-         a(i,0,0)=fac*(ddx*cf2(i)*a(i-1,0,0)-cf3(i)*a(i-2,0,0))
-         a(0,i,0)=fac*(ddy*cf2(i)*a(0,i-1,0)-cf3(i)*a(0,i-2,0))
-         a(0,0,i)=fac*(ddz*cf2(i)*a(0,0,i-1)-cf3(i)*a(0,0,i-2))
+C#############################
+         cft1=cf1_new(i)
+         cft2=cf2(i)
+         cft3=cf3(i)
+C#############################
+         b(i,0,0)=cft1*(dx*a(i-1,0,0)-a(i-2,0,0))
+         b(0,i,0)=cft1*(dy*a(0,i-1,0)-a(0,i-2,0))
+         b(0,0,i)=cft1*(dz*a(0,0,i-1)-a(0,0,i-2))
+
+         a(i,0,0)=fac*(ddx*cft2*a(i-1,0,0)-cft3*a(i-2,0,0)+
+     &            cft1*(dx*b(i-1,0,0)-b(i-2,0,0)))
+         a(0,i,0)=fac*(ddy*cft2*a(0,i-1,0)-cft3*a(0,i-2,0)+
+     &            cft1*(dy*b(0,i-1,0)-b(0,i-2,0)))
+         a(0,0,i)=fac*(ddz*cft2*a(0,0,i-1)-cft3*a(0,0,i-2)+
+     &            cft1*(dz*b(0,0,i-1)-b(0,0,i-2)))
       END DO
 
 C 1 index 0, 1 index 1, other >=1
 
-      a(1,1,0)=fac*(dx*a(0,1,0)+ddy*a(1,0,0))
-      a(1,0,1)=fac*(dx*a(0,0,1)+ddz*a(1,0,0))
-      a(0,1,1)=fac*(dy*a(0,0,1)+ddz*a(0,1,0))
+      b(1,1,0)=kappax*a(0,1,0)
+      b(1,0,1)=kappax*a(0,0,1)
+      b(0,1,1)=kappay*a(0,0,1)
+
+      a(1,1,0)=fac*(dx*a(0,1,0)+ddy*a(1,0,0)+kappax*b(0,1,0))
+      a(1,0,1)=fac*(dx*a(0,0,1)+ddz*a(1,0,0)+kappax*b(0,0,1))
+      a(0,1,1)=fac*(dy*a(0,0,1)+ddz*a(0,1,0)+kappay*b(0,0,1))
 
       DO i=2,torderlim-1
-         a(1,0,i)=fac*(dx*a(0,0,i)+ddz*a(1,0,i-1)-a(1,0,i-2))
-         a(0,1,i)=fac*(dy*a(0,0,i)+ddz*a(0,1,i-1)-a(0,1,i-2))
-         a(0,i,1)=fac*(dz*a(0,i,0)+ddy*a(0,i-1,1)-a(0,i-2,1))
-         a(1,i,0)=fac*(dx*a(0,i,0)+ddy*a(1,i-1,0)-a(1,i-2,0))
-         a(i,1,0)=fac*(dy*a(i,0,0)+ddx*a(i-1,1,0)-a(i-2,1,0))
-         a(i,0,1)=fac*(dz*a(i,0,0)+ddx*a(i-1,0,1)-a(i-2,0,1))
+         b(1,0,i)=kappax*a(0,0,i)
+         b(0,1,i)=kappay*a(0,0,i)
+         b(0,i,1)=kappaz*a(0,i,0)
+         b(1,i,0)=kappax*a(0,i,0)
+         b(i,1,0)=kappay*a(i,0,0)
+         b(i,0,1)=kappaz*a(i,0,0)
+
+         a(1,0,i)=fac*(dx*a(0,0,i)+ddz*a(1,0,i-1)-a(1,0,i-2)+
+     &            kappax*b(0,0,i)) 
+         a(0,1,i)=fac*(dy*a(0,0,i)+ddz*a(0,1,i-1)-a(0,1,i-2)+
+     &            kappay*b(0,0,i))
+         a(0,i,1)=fac*(dz*a(0,i,0)+ddy*a(0,i-1,1)-a(0,i-2,1)+
+     &            kappaz*b(0,i,0))
+         a(1,i,0)=fac*(dx*a(0,i,0)+ddy*a(1,i-1,0)-a(1,i-2,0)+
+     &            kappax*b(0,i,0))
+         a(i,1,0)=fac*(dy*a(i,0,0)+ddx*a(i-1,1,0)-a(i-2,1,0)+
+     &            kappay*b(i,0,0))
+         a(i,0,1)=fac*(dz*a(i,0,0)+ddx*a(i-1,0,1)-a(i-2,0,1)+
+     &            kappaz*b(i,0,0))         
       END DO
 
 C 1 index 0, others >= 2
 
       DO i=2,torderlim-2
+            
+C#############################
+         cft1=cf1_new(i)
+         cft2=cf2(i)
+         cft3=cf3(i)
+C#############################
          DO j=2,torderlim-i
+            b(i,j,0)=cft1*(dx*a(i-1,j,0)-a(i-2,j,0))
+            b(i,0,j)=cft1*(dx*a(i-1,0,j)-a(i-2,0,j))
+            b(0,i,j)=cft1*(dy*a(0,i-1,j)-a(0,i-2,j))
 
-            a(i,j,0)=fac*(ddx*cf2(i)*a(i-1,j,0)+ddy*a(i,j-1,0)
-     &               -cf3(i)*a(i-2,j,0)-a(i,j-2,0))
-            a(i,0,j)=fac*(ddx*cf2(i)*a(i-1,0,j)+ddz*a(i,0,j-1)
-     &               -cf3(i)*a(i-2,0,j)-a(i,0,j-2))
-            a(0,i,j)=fac*(ddy*cf2(i)*a(0,i-1,j)+ddz*a(0,i,j-1)
-     &               -cf3(i)*a(0,i-2,j)-a(0,i,j-2))
+            a(i,j,0)=fac*(ddx*cft2*a(i-1,j,0)+ddy*a(i,j-1,0)
+     &               -cft3*a(i-2,j,0)-a(i,j-2,0)+
+     &               cft1*(dx*b(i-1,j,0)-b(i-2,j,0)))
+            a(i,0,j)=fac*(ddx*cft2*a(i-1,0,j)+ddz*a(i,0,j-1)
+     &               -cft3*a(i-2,0,j)-a(i,0,j-2)+
+     &               cft1*(dx*b(i-1,0,j)-b(i-2,0,j)))
+            a(0,i,j)=fac*(ddy*cft2*a(0,i-1,j)+ddz*a(0,i,j-1)
+     &               -cft3*a(0,i-2,j)-a(0,i,j-2)+
+     &               cft1*(dy*b(0,i-1,j)-b(0,i-2,j)))
          END DO
       END DO
 
 C 2 indices 1, other >= 1
+C b(1,1,1) is correct, but a little tricky!
+C      b(1,1,1)=5.0*dz*fac*b(1,1,0)
 
-      a(1,1,1)=fac*(dx*a(0,1,1)+ddy*a(1,0,1)+ddz*a(1,1,0))
+      b(1,1,1)=kappax*a(0,1,1)
+      a(1,1,1)=fac*(dx*a(0,1,1)+ddy*a(1,0,1)+ddz*a(1,1,0)+
+     &         kappax*b(0,1,1))
 
       DO i=2,torderlim-2
+         b(1,1,i)=kappax*a(0,1,i)
+         b(1,i,1)=kappax*a(0,i,1)
+         b(i,1,1)=kappay*a(i,0,1)
 
          a(1,1,i)=fac*(dx*a(0,1,i)+ddy*a(1,0,i)+ddz*a(1,1,i-1)
-     &           -a(1,1,i-2))
+     &           -a(1,1,i-2)+kappax*b(0,1,i))
          a(1,i,1)=fac*(dx*a(0,i,1)+ddy*a(1,i-1,1)+ddz*a(1,i,0)
-     &           -a(1,i-2,1))
+     &           -a(1,i-2,1)+kappax*b(0,i,1))
          a(i,1,1)=fac*(dy*a(i,0,1)+ddx*a(i-1,1,1)+ddz*a(i,1,0)
-     &           -a(i-2,1,1))
+     &           -a(i-2,1,1)+kappay*b(i,0,1))
       END DO
 
 C 1 index 1, others >=2
 
       DO i=2,torderlim-3
          DO j=2,torderlim-i
+            b(1,i,j)=kappax*a(0,i,j)
+            b(i,1,j)=kappay*a(i,0,j)
+            b(i,j,1)=kappaz*a(i,j,0)
 
             a(1,i,j)=fac*(dx*a(0,i,j)+ddy*a(1,i-1,j)+ddz*a(1,i,j-1)
-     &              -a(1,i-2,j)-a(1,i,j-2))
+     &              -a(1,i-2,j)-a(1,i,j-2)+kappax*b(0,i,j))
             a(i,1,j)=fac*(dy*a(i,0,j)+ddx*a(i-1,1,j)+ddz*a(i,1,j-1)
-     &              -a(i-2,1,j)-a(i,1,j-2))
+     &              -a(i-2,1,j)-a(i,1,j-2)+kappay*b(i,0,j))
             a(i,j,1)=fac*(dz*a(i,j,0)+ddx*a(i-1,j,1)+ddy*a(i,j-1,1)
-     &              -a(i-2,j,1)-a(i,j-2,1))
+     &              -a(i-2,j,1)-a(i,j-2,1)+kappaz*b(i,j,0))
 
          END DO
       END DO
@@ -577,19 +623,196 @@ C all indices >=2
       DO k=2,torderlim-4
          DO j=2,torderlim-2-k
             DO i=2,torderlim-k-j
+               b(i,j,k)=cf1_new(i)*(dx*a(i-1,j,k)-a(i-2,j,k))
 
                a(i,j,k)=fac*(ddx*cf2(i)*a(i-1,j,k)+ddy*a(i,j-1,k)
      &                 +ddz*a(i,j,k-1)-cf3(i)*a(i-2,j,k)
-     &                 -a(i,j-2,k)-a(i,j,k-2))
+     &                 -a(i,j-2,k)-a(i,j,k-2)+
+     &                 cf1_new(i)*(dx*b(i-1,j,k)-b(i-2,j,k)))
+            END DO
+         END DO
+      END DO
+
+      RETURN
+      END SUBROUTINE COMP_TCOEFF_NEW
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+      SUBROUTINE COMP_TCOEFF(p,kappa)
+      IMPLICIT NONE
+C
+C COMP_TCOEFF computes the Taylor coefficients of the potential
+C using a recurrence formula.  The center of the expansion is the
+C midpoint of the node P.  TARPOS and TORDERLIM are globally defined.
+C
+      TYPE(tnode),POINTER :: p
+      REAL(KIND=r8),INTENT(IN)  :: kappa
+
+C local varaibles
+
+      REAL(KIND=r8) :: dx,dy,dz,ddx,ddy,ddz,dist,fac,cf1_new(torderlim)
+      REAL(KIND=r8) :: kappax,kappay,kappaz
+      INTEGER :: i,j,k
+
+C setup variables
+      cf1_new=cf1*kappa 
+     
+      dx=tarpos(1)-p%x_mid
+      dy=tarpos(2)-p%y_mid
+      dz=tarpos(3)-p%z_mid
+
+      ddx=2.0_r8*dx
+      ddy=2.0_r8*dy
+      ddz=2.0_r8*dz
+
+      kappax=kappa*dx
+      kappay=kappa*dy
+      kappaz=kappa*dz
+
+      dist=dx*dx+dy*dy+dz*dz
+      fac=1.0_r8/dist
+      dist=SQRT(dist)
+
+C 0th coeff or function val
+
+      b(0,0,0)=EXP(-kappa*dist)
+      a(0,0,0)=b(0,0,0)/dist
+
+C 2 indices are 0
+
+      b(1,0,0)=kappax*a(0,0,0)
+      b(0,1,0)=kappay*a(0,0,0)
+      b(0,0,1)=kappaz*a(0,0,0)
+
+      a(1,0,0)=fac*dx*(a(0,0,0)+kappa*b(0,0,0))
+      a(0,1,0)=fac*dy*(a(0,0,0)+kappa*b(0,0,0))
+      a(0,0,1)=fac*dz*(a(0,0,0)+kappa*b(0,0,0))
+
+
+      DO i=2,torderlim
+         b(i,0,0)=cf1_new(i)*(dx*a(i-1,0,0)-a(i-2,0,0))
+         b(0,i,0)=cf1_new(i)*(dy*a(0,i-1,0)-a(0,i-2,0))
+         b(0,0,i)=cf1_new(i)*(dz*a(0,0,i-1)-a(0,0,i-2))
+
+         a(i,0,0)=fac*(ddx*cf2(i)*a(i-1,0,0)-cf3(i)*a(i-2,0,0)+
+     &            cf1_new(i)*(dx*b(i-1,0,0)-b(i-2,0,0)))
+         a(0,i,0)=fac*(ddy*cf2(i)*a(0,i-1,0)-cf3(i)*a(0,i-2,0)+
+     &            cf1_new(i)*(dy*b(0,i-1,0)-b(0,i-2,0)))
+         a(0,0,i)=fac*(ddz*cf2(i)*a(0,0,i-1)-cf3(i)*a(0,0,i-2)+
+     &            cf1_new(i)*(dz*b(0,0,i-1)-b(0,0,i-2)))
+      END DO
+
+C 1 index 0, 1 index 1, other >=1
+
+      b(1,1,0)=kappax*a(0,1,0)
+      b(1,0,1)=kappax*a(0,0,1)
+      b(0,1,1)=kappay*a(0,0,1)
+
+      a(1,1,0)=fac*(dx*a(0,1,0)+ddy*a(1,0,0)+kappax*b(0,1,0))
+      a(1,0,1)=fac*(dx*a(0,0,1)+ddz*a(1,0,0)+kappax*b(0,0,1))
+      a(0,1,1)=fac*(dy*a(0,0,1)+ddz*a(0,1,0)+kappay*b(0,0,1))
+
+      DO i=2,torderlim-1
+         b(1,0,i)=kappax*a(0,0,i)
+         b(0,1,i)=kappay*a(0,0,i)
+         b(0,i,1)=kappaz*a(0,i,0)
+         b(1,i,0)=kappax*a(0,i,0)
+         b(i,1,0)=kappay*a(i,0,0)
+         b(i,0,1)=kappaz*a(i,0,0)
+
+         a(1,0,i)=fac*(dx*a(0,0,i)+ddz*a(1,0,i-1)-a(1,0,i-2)+
+     &            kappax*b(0,0,i)) 
+         a(0,1,i)=fac*(dy*a(0,0,i)+ddz*a(0,1,i-1)-a(0,1,i-2)+
+     &            kappay*b(0,0,i))
+         a(0,i,1)=fac*(dz*a(0,i,0)+ddy*a(0,i-1,1)-a(0,i-2,1)+
+     &            kappaz*b(0,i,0))
+         a(1,i,0)=fac*(dx*a(0,i,0)+ddy*a(1,i-1,0)-a(1,i-2,0)+
+     &            kappax*b(0,i,0))
+         a(i,1,0)=fac*(dy*a(i,0,0)+ddx*a(i-1,1,0)-a(i-2,1,0)+
+     &            kappay*b(i,0,0))
+         a(i,0,1)=fac*(dz*a(i,0,0)+ddx*a(i-1,0,1)-a(i-2,0,1)+
+     &            kappaz*b(i,0,0))         
+      END DO
+
+C 1 index 0, others >= 2
+
+      DO i=2,torderlim-2
+         DO j=2,torderlim-i
+            b(i,j,0)=cf1_new(i)*(dx*a(i-1,j,0)-a(i-2,j,0))
+            b(i,0,j)=cf1_new(i)*(dx*a(i-1,0,j)-a(i-2,0,j))
+            b(0,i,j)=cf1_new(i)*(dy*a(0,i-1,j)-a(0,i-2,j))
+
+            a(i,j,0)=fac*(ddx*cf2(i)*a(i-1,j,0)+ddy*a(i,j-1,0)
+     &               -cf3(i)*a(i-2,j,0)-a(i,j-2,0)+
+     &               cf1_new(i)*(dx*b(i-1,j,0)-b(i-2,j,0)))
+            a(i,0,j)=fac*(ddx*cf2(i)*a(i-1,0,j)+ddz*a(i,0,j-1)
+     &               -cf3(i)*a(i-2,0,j)-a(i,0,j-2)+
+     &               cf1_new(i)*(dx*b(i-1,0,j)-b(i-2,0,j)))
+            a(0,i,j)=fac*(ddy*cf2(i)*a(0,i-1,j)+ddz*a(0,i,j-1)
+     &               -cf3(i)*a(0,i-2,j)-a(0,i,j-2)+
+     &               cf1_new(i)*(dy*b(0,i-1,j)-b(0,i-2,j)))
+         END DO
+      END DO
+
+C 2 indices 1, other >= 1
+C b(1,1,1) is correct, but a little tricky!
+C      b(1,1,1)=5.0*dz*fac*b(1,1,0)
+
+      b(1,1,1)=kappax*a(0,1,1)
+      a(1,1,1)=fac*(dx*a(0,1,1)+ddy*a(1,0,1)+ddz*a(1,1,0)+
+     &         kappax*b(0,1,1))
+
+      DO i=2,torderlim-2
+         b(1,1,i)=kappax*a(0,1,i)
+         b(1,i,1)=kappax*a(0,i,1)
+         b(i,1,1)=kappay*a(i,0,1)
+
+         a(1,1,i)=fac*(dx*a(0,1,i)+ddy*a(1,0,i)+ddz*a(1,1,i-1)
+     &           -a(1,1,i-2)+kappax*b(0,1,i))
+         a(1,i,1)=fac*(dx*a(0,i,1)+ddy*a(1,i-1,1)+ddz*a(1,i,0)
+     &           -a(1,i-2,1)+kappax*b(0,i,1))
+         a(i,1,1)=fac*(dy*a(i,0,1)+ddx*a(i-1,1,1)+ddz*a(i,1,0)
+     &           -a(i-2,1,1)+kappay*b(i,0,1))
+      END DO
+
+C 1 index 1, others >=2
+
+      DO i=2,torderlim-3
+         DO j=2,torderlim-i
+            b(1,i,j)=kappax*a(0,i,j)
+            b(i,1,j)=kappay*a(i,0,j)
+            b(i,j,1)=kappaz*a(i,j,0)
+
+            a(1,i,j)=fac*(dx*a(0,i,j)+ddy*a(1,i-1,j)+ddz*a(1,i,j-1)
+     &              -a(1,i-2,j)-a(1,i,j-2)+kappax*b(0,i,j))
+            a(i,1,j)=fac*(dy*a(i,0,j)+ddx*a(i-1,1,j)+ddz*a(i,1,j-1)
+     &              -a(i-2,1,j)-a(i,1,j-2)+kappay*b(i,0,j))
+            a(i,j,1)=fac*(dz*a(i,j,0)+ddx*a(i-1,j,1)+ddy*a(i,j-1,1)
+     &              -a(i-2,j,1)-a(i,j-2,1)+kappaz*b(i,j,0))
+
+         END DO
+      END DO
+
+C all indices >=2
+
+      DO k=2,torderlim-4
+         DO j=2,torderlim-2-k
+            DO i=2,torderlim-k-j
+               b(i,j,k)=cf1_new(i)*(dx*a(i-1,j,k)-a(i-2,j,k))
+
+               a(i,j,k)=fac*(ddx*cf2(i)*a(i-1,j,k)+ddy*a(i,j-1,k)
+     &                 +ddz*a(i,j,k-1)-cf3(i)*a(i-2,j,k)
+     &                 -a(i,j-2,k)-a(i,j,k-2)+
+     &                 cf1_new(i)*(dx*b(i-1,j,k)-b(i-2,j,k)))
             END DO
          END DO
       END DO
 
       RETURN
       END SUBROUTINE COMP_TCOEFF
-      
+
+
 CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
-      SUBROUTINE COMP_MS(p,x,y,z,q,numpars)
+      SUBROUTINE COMP_MS(p,x,y,z,q,q_u,numpars)
       IMPLICIT NONE
 C
 C COMP_MS computes the moments for node P needed in the Taylor approximation
@@ -598,7 +821,8 @@ C
       TYPE(tnode),POINTER :: p 
       REAL(KIND=r8),DIMENSION(numpars),INTENT(IN) :: x,y,z
 C##################################################################
-      REAL(KIND=r8),DIMENSION(numpars,4),INTENT(IN) ::q
+      REAL(KIND=r8),DIMENSION(numpars,16),INTENT(IN) ::q
+	  REAL(KIND=r8),DIMENSION(numpars,16),INTENT(IN) ::q_u
 C##################################################################
 
 C local variables
@@ -607,6 +831,7 @@ C local variables
       REAL(KIND=r8) :: dx,dy,dz,tx,ty,tz,txyz
      
       p%ms=0.0_r8
+	  p%ms_new=0.0_r8
       DO i=p%ibeg,p%iend
          dx=x(i)-p%x_mid
          dy=y(i)-p%y_mid
@@ -619,7 +844,13 @@ C local variables
                DO k1=0,torder-k3-k2
 C####################################################################
 				txyz=tx*ty*tz
-				p%ms(2:4,k1,k2,k3)=p%ms(2:4,k1,k2,k3)+q(i,2:4)*txyz
+C				p%ms(k1,k2,k3,1:7)=p%ms(k1,k2,k3,1:7)+q(i,1:7)*txyz
+C				p%ms(k1,k2,k3,8:14:3)=p%ms(k1,k2,k3,8:14:3)+q(i,8:14:3)*txyz
+				p%ms(1:7,k1,k2,k3)=p%ms(1:7,k1,k2,k3)+q(i,1:7)*txyz
+			p%ms_new(1:7,k1,k2,k3)=p%ms_new(1:7,k1,k2,k3)+q_u(i,1:7)*txyz
+				p%ms(8:14:3,k1,k2,k3)=p%ms(8:14:3,k1,k2,k3)+q(i,8:14:3)*txyz
+                p%ms_new(8:14:3,k1,k2,k3)=p%ms_new(8:14:3,k1,k2,k3)
+     & 				   +q_u(i,8:14:3)*txyz
 C#################################################################### 
 				tx=tx*dx
                END DO
@@ -628,6 +859,26 @@ C####################################################################
             tz=tz*dz
          END DO
       END DO
+C####################################################################
+      p%ms(9,:,:,:) =p%ms(8,:,:,:)
+      p%ms(10,:,:,:)=p%ms(8,:,:,:)
+      p%ms(12,:,:,:)=p%ms(11,:,:,:)
+      p%ms(13,:,:,:)=p%ms(11,:,:,:)
+      p%ms(15,:,:,:)=p%ms(14,:,:,:)
+      p%ms(16,:,:,:)=p%ms(14,:,:,:)
+	  
+      p%ms_new(9,:,:,:) =p%ms_new(8,:,:,:)
+      p%ms_new(10,:,:,:)=p%ms_new(8,:,:,:)
+      p%ms_new(12,:,:,:)=p%ms_new(11,:,:,:)
+      p%ms_new(13,:,:,:)=p%ms_new(11,:,:,:)
+      p%ms_new(15,:,:,:)=p%ms_new(14,:,:,:)
+      p%ms_new(16,:,:,:)=p%ms_new(14,:,:,:)
+C      p%ms(:,:,:,9) =p%ms(:,:,:,8)
+C      p%ms(:,:,:,10)=p%ms(:,:,:,8)
+C      p%ms(:,:,:,12)=p%ms(:,:,:,11)
+C      p%ms(:,:,:,13)=p%ms(:,:,:,11)
+C      p%ms(:,:,:,15)=p%ms(:,:,:,14)
+C      p%ms(:,:,:,16)=p%ms(:,:,:,14)
 C####################################################################
       RETURN
       END SUBROUTINE COMP_MS
@@ -644,15 +895,15 @@ C particle determined by the global variable TARPOS.
 C
       INTEGER,INTENT(IN) :: ibeg,iend,numpars
       REAL*8,DIMENSION(numpars),INTENT(IN) :: x,y,z
-      REAL*8,DIMENSION(numpars),INTENT(IN) :: tpoten
+      REAL*8,DIMENSION(2*numpars),INTENT(IN) :: tpoten
       REAL*8,INTENT(IN) :: kappa,eps
-      REAL*8,INTENT(OUT) :: peng
+      REAL*8,INTENT(OUT) :: peng(2)
 
 C local variables
 
       INTEGER :: j
       REAL*8 :: dist2,dist,tx,ty,tz,soupos(3),souq(3)
-      real*8 :: peng_old,L1,L2,L3,L4, area,temp_area
+      real*8 :: peng_old2(2),L1,L2,L3,L4, area,temp_area
 
 C%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
       real*8 :: r(3),s(3),v(3),v0(3),pi,rs,cos_theta,cos_theta0,kappa_rs
@@ -679,18 +930,43 @@ C		  L2=H2(soupos,tarpos,kappa)
 C		  L3=H3(tarq,souq,soupos,tarpos,kappa)
 C		  L4=H4(tarq,soupos,tarpos,kappa,eps)
 C%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-          
           r=(/x(j),y(j),z(j)/)
           v=tr_q(:,j)
           
           s=tarpos
+          v0=tarq
           rs=sqrt(dot_product(r-s,r-s))
+!          if (rs<1.d-6) goto 1022    
           G0=one_over_4pi/rs
-          cos_theta=dot_product(v,r-s)/rs
-          tp1=G0/rs
-          G1=cos_theta*tp1
-          peng=peng+G1*tpoten(j)*tr_area(j)
+          kappa_rs=kappa*rs
+          exp_kappa_rs=exp(-kappa_rs)
+          Gk=exp_kappa_rs*G0
           
+          cos_theta=dot_product(v,r-s)/rs
+          cos_theta0=dot_product(v0,r-s)/rs
+
+          tp1=G0/rs
+          tp2=(1.d0+kappa_rs)*exp_kappa_rs
+         
+          G10=cos_theta0*tp1
+          G20=tp2*G10
+
+          G1=cos_theta*tp1
+          G2=tp2*G1
+
+          G3=(dot_product(v0,v)-3.d0*cos_theta0*cos_theta)/rs*tp1
+          G4=tp2*G3-kappa**2*cos_theta0*cos_theta*Gk
+
+          L1=G1-eps*G2
+          L2=G0-Gk
+          L3=G4-G3
+          L4=G10-G20/eps
+ 
+          peng_old2(1)=tpoten(j)
+          peng_old2(2)=tpoten(j+numpars)
+          area=tr_area(j)
+          peng(1)=peng(1)+(L1*(peng_old2(1)-peng_old(1)))*area !gan:just for Poisson, +L2*peng_old2(2) is removed temporary
+          peng(2)=peng(2)!gan: temporary remove the singularity dueto the PB kernel
 C#############################################
 !1022	continue         
       END DO   
@@ -764,6 +1040,7 @@ C local variables
 
       IF (p%exist_ms .EQ. 1) THEN
          DEALLOCATE(p%ms,STAT=err)
+		 DEALLOCATE(p%ms_new,STAT=err)
          IF (err .NE. 0) THEN
             WRITE(6,*) 'Error deallocating node MS! '
             STOP
@@ -800,6 +1077,7 @@ C local variables
 
       IF (p%exist_ms .EQ. 1) THEN
          DEALLOCATE(p%ms,STAT=err)
+		 DEALLOCATE(p%ms_new,STAT=err)
          IF (err .NE. 0) THEN
             WRITE(6,*) 'Error deallocating node MS! '
             STOP
@@ -832,51 +1110,130 @@ C
       TYPE(tnode),POINTER :: p  
 C      REAL(KIND=r8),DIMENSION(numpars),INTENT(INOUT) :: tpoten
       REAL*8 :: kappa,eps
-      REAL*8 :: tpoten(numpars)
-	
+      REAL*8 :: tpoten(2*numpars)
+
+
+
 C local variables
-
       INTEGER :: i,j,ikp,indx,kkk(3)
-      REAL*8 :: peng,tempx,temp_area,sL(4),tpoten_old(numpars)
-      REAL*8 :: pt_comp(numpars,4), kapa,time1,time2,tempq(4)
-      REAL*8 :: pre1,pre2,pre3
-      
+	  
+	  INTEGER :: sph_labeli, sph_labelj !gan: for adding the kronecker delta function for the integral equation with ccss 
+	  REAL*8 :: temp_labeli, temp_labelj
+	  REAL*8 :: dist2,dist,tx,ty,tz,soupos(3),souq(3)
+      REAL*8 :: peng_old2(2),L1,L2,L3,L4, area
 
-      print *,'entering TREE_COMPP_PB'
+      REAL*8 :: peng(2),tempx,temp_area,sL(4),tpoten_old(2*numpars)
+      REAL*8 :: pt_comp(numpars,16,2), kapa,time1,time2,tempq(16,2)
+      REAL*8 :: pre1,pre2,pre3,correction,test       !new scheme gan
+
+      REAL*8 :: r(3),s(3),v(3),v0(3),pi,rs,cos_theta,cos_theta0,kappa_rs
+      REAL*8 :: G0,Gk,G10,G20,G1,G2,G3,G4,one_over_4pi,exp_kappa_rs
+      REAL*8 :: tp1,tp2,tp3
+      common // pi,one_over_4pi
+
+
+C      print *,'entering TREE_COMPP_PB'
       pre1=0.5d0*(1.d0+eps)
-      !pre2=0.5d0*(1.d0+1.d0/eps)
-      pre3=(1-eps)
+      pre2=0.5d0*(1.d0+1.d0/eps)
+	  pre3=(1-eps)
       tpoten_old=tpoten
       call pb_kernel(tpoten_old)
-      DO i=1,numpars      
+
+c$omp parallel
+c$omp& shared (eps,numpars,y,z,tr_q,one_over_4pi)
+c$omp& shared (tchg,tpoten_old,pre3,pre1)
+c$omp& shared (tpoten,x,tr_area)
+c$omp& private (i,tempq,peng,tempx,temp_area,correction)
+c$omp& private (sph_labeli,temp_labeli,sph_labelj,temp_labelj)
+c$omp& private (j,r,v,s,v0,rs,G0,cos_theta)
+c$omp& private (tp1,tp2,G1,G2,L1,peng_old2,area,tarpos,tarq,peng_old)
+
+c$omp do
+
+        do i=1,numpars
 		tarpos(1)=x(i)
 		tarpos(2)=y(i)
 		tarpos(3)=z(i)
 		tarq=tr_q(:,i)
-		tempq=tchg(i,:)
-		peng_old=tpoten_old(i)
-		!peng_old(2)=tpoten_old(i+numpars)
+		tempq=tchg(i,:,:)
+		peng_old(1)=tpoten_old(i)
+		peng_old(2)=tpoten_old(i+numpars)
 		peng=0.d0
 C%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 C Remove the singularities 
                 tempx=x(i)
                 temp_area=tr_area(i)
-                x(i)=x(i)+100.123456789d0
-                tr_area(i)=0.d0
+              !  x(i)=x(i)+100.123456789d0
+            !    tr_area(i)=0.d0
+        do j=1, numpars
+        IF (i .NE. j) THEN
+C&=%%%%%%%%%%%%%%%%%%
+            r=(/x(j),y(j),z(j)/)
+            v=tr_q(:,j)
+
+            s=tarpos
+            v0=tarq
+            rs=sqrt(dot_product(r-s,r-s))
+
+            G0=one_over_4pi/rs
+
+            cos_theta=dot_product(v,r-s)/rs
+
+            tp1=G0/rs
+
+            tp2=1.d0
+
+            G1=cos_theta*tp1
+            G2=G1
+
+            L1=G1-eps*G2
+
+            peng_old2(1)=tpoten_old(j)
+
+            area=tr_area(j)
+			temp_labeli=real(i)/real(nface1)
+			sph_labeli=ceiling(temp_labeli)
+			
+			temp_labelj=real(j)/real(nface1)
+			sph_labelj=ceiling(temp_labelj)
+			 IF (sph_labeli .EQ. sph_labelj) THEN
+            peng(1)=peng(1)+(L1*(peng_old2(1)-peng_old(1)))*area !gan:just for Poisson, +L2*peng_old2(2) is removed temporary
+			
+			ELSE IF (sph_labeli .NE. sph_labelj) THEN
+				peng(1)=peng(1)+L1*(peng_old2(1))*area
+			END IF
+           ! test=(L1*(peng_old2(1)-peng_old(1)))*area
+           ! Write(*,*) 'test= ',i,j,L1,peng_old2(1),peng_old(1),test
+            END IF
+
+
+C%%%%%%%%%%%%%%%%%%%%
+
+
+
+
 C%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-	
-		CALL COMPP_TREE(p,peng,x,y,z,schg,tpoten_old,
-     &		kappa,theta,numpars,kk,eps,tempq,der_cof)
-		tpoten(i)=pre1*peng_old-pre3*peng
-		!tpoten(numpars+i)=pre2*peng_old(2)-peng(2)
+
+c		CALL COMPP_TREE(p,peng,x,y,z,schg,schg_u,tpoten_old,
+c     &		kappa,theta,numpars,kk,eps,tempq,der_cof)
+
 C		call cpu_time(time2)
 C%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-        x(i)=tempx
-        tr_area(i)=temp_area
+
 C%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 C		print *,'cpu time for one p-c intercation: ',i,real(time2-time1)
-	ENDDO
-	
+        end do
+        correction=-0.5*pre3*peng_old(1)
+        tpoten(i)=pre1*peng_old(1)-peng(1)+correction
+        tpoten(numpars+i)=0.0 !pre2*peng_old(2)-peng(2)
+        !x(i)=tempx
+        !tr_area(i)=temp_area
+        end do
+
+c$omp end do
+
+c$omp end parallel
+
 
       RETURN
       END SUBROUTINE TREE_COMPP_PB
